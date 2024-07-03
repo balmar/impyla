@@ -369,9 +369,9 @@ def get_socket(host, port, use_ssl, ca_cert):
             return self.handle is not None
 
         if ca_cert is None:
-            return ImpalaTSSLSocket(host, port, validate=False)
+            return TSSLSocket(host, port, validate=False)
         else:
-            return ImpalaTSSLSocket(host, port, validate=True, ca_certs=ca_cert)
+            return TSSLSocket(host, port, validate=True, ca_certs=ca_cert)
     else:
         return TSocket(host, port)
 
