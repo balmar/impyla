@@ -360,7 +360,7 @@ def get_socket(host, port, use_ssl, ca_cert):
 
     if use_ssl:
         from thrift.transport.TSSLSocket import TSSLSocket
-
+        log.debug('get_socket - use_ssl')
         # This copies the solution in IMPALA-11343.
         # TODO: remove once Thrit 0.17.0 is released
         class ImpalaTSSLSocket(TSSLSocket):
