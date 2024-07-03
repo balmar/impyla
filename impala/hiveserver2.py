@@ -898,7 +898,7 @@ def connect(host, port, timeout=None, use_ssl=False, ca_cert=None,
             user_agent=None):
     log.debug('Connecting to HiveServer2 %s:%s with %s authentication '
               'mechanism', host, port, auth_mechanism)
-
+    print('This works!')
     if krb_host:
         kerberos_host = krb_host
     else:
