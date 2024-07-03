@@ -928,6 +928,7 @@ def connect(host, port, timeout=None, use_ssl=False, ca_cert=None,
         transport = get_transport(sock, kerberos_host, kerberos_service_name,
                                 auth_mechanism, user, password)
 
+    print('transport.open')
     transport.open()
     protocol = TBinaryProtocolAccelerated(transport)
     service = ThriftClient(protocol)
