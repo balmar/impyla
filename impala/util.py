@@ -35,6 +35,7 @@ except ImportError:
 
 
 def get_logger_and_init_null(logger_name):
+    print('Initialising logger %s' % logger_name)
     logger = logging.getLogger(logger_name)
     logger.addHandler(NullHandler())
     return logger
