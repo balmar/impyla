@@ -23,6 +23,7 @@ import operator
 import six
 import sys
 import time
+import asyncio
 from bitarray import bitarray
 from six.moves import range
 
@@ -453,7 +454,7 @@ class HiveServer2Cursor(Cursor):
         self._last_operation_active = True
         self._debug_log_state()
 
-    def _wait_to_finish(self):
+    async def _wait_to_finish(self):
         # Prior to IMPALA-1633 GetOperationStatus does not populate errorMessage
         # in case of failure. If not populated, queries that return results
         # can get a failure description with a further call to FetchResults rpc.
@@ -480,7 +481,7 @@ class HiveServer2Cursor(Cursor):
             if not self._op_state_is_executing(operation_state):
                 self._last_operation_finished = True
                 break
-            time.sleep(self._get_sleep_interval(loop_start))
+            await asyncio.sleep(self._get_sleep_interval(loop_start))
 
     def status(self):
         if self._last_operation is None:
@@ -1160,7 +1161,7 @@ class ThriftRPC(object):
         err_if_rpc_not_ok(response)
         return response
 
-    def _execute(self, func_name, request, retry_on_http_error=False):
+    async def _execute(self, func_name, request, retry_on_http_error=False):
         # pylint: disable=protected-access
         # get the thrift transport
         transport = self.client._iprot.trans
@@ -1200,11 +1201,11 @@ class ThriftRPC(object):
                         log.debug("sleeping after seeing Retry-After value of %d", retry_secs)
                         log.debug('Caught HttpError %s %s in %s (tries_left=%s), retry after %d secs',
                                   h, str(h.body or ''), func_name, tries_left, retry_secs)
-                        time.sleep(retry_secs)
+                        await asyncio.sleep(retry_secs)
                     else:
                         retry_secs = 1  # Future: use exponential backoff?
                         log.debug("sleeping for %d second before retrying", retry_secs)
-                        time.sleep(retry_secs)
+                        await asyncio.sleep(retry_secs)
                         log.debug('Caught HttpError %s %s in %s (tries_left=%s)',
                                   h, str(h.body or ''), func_name, tries_left)
 
