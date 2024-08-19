@@ -787,6 +787,15 @@ class HiveServer2DictCursor(HiveServer2Cursor):
             self.fields = [d[0] for d in self.description]
         else:
             self.fields = None
+    
+    # https://github.com/cloudera/impyla/issues/292
+    def execute_async(self, operation, parameters=None, configuration=None):
+        super(self.__class__, self).execute_async(operation, parameters,
+                                                configuration)
+        if self.description is not None:
+            self.fields = [d[0] for d in self.description]
+        else:
+            self.fields = None
 
     def __next__(self):
         record = super(self.__class__, self).__next__()
