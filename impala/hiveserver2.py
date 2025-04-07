@@ -84,7 +84,8 @@ class HiveServer2Connection(Connection):
         raise NotSupportedError
 
     def cursor(self, user=None, configuration=None, convert_types=True,
-               dictify=False, fetch_error=True, close_finished_queries=True):
+               dictify=False, fetch_error=True, close_finished_queries=True,
+               convert_strings_to_unicode=True):
         """Get a cursor from the HiveServer2 (HS2) connection.
 
         Parameters
@@ -96,6 +97,12 @@ class HiveServer2Connection(Connection):
             When `False`, timestamps and decimal values will not be converted
             to Python `datetime` and `Decimal` values. (These conversions are
             expensive.) Only applies when using HS2 protocol versions > 6.
+        convert_strings_to_unicode : bool, optional
+            When `True`, the following types, which are transmitted as strings
+            in HS2 protocol, will be converted to unicode: STRING, LIST, MAP, 
+            STRUCT, UNIONTYPE, NULL, VARCHAR, CHAR, TIMESTAMP, DECIMAL, DATE.
+            When `False`, conversion will occur only for types expected by 
+            convert_types in python3: TIMESTAMP, DECIMAL, DATE.
         dictify : bool, optional
             When `True` cursor will return key value pairs instead of rows.
         fetch_error : bool, optional
@@ -151,7 +158,8 @@ class HiveServer2Connection(Connection):
 
         cursor = cursor_class(session, convert_types=convert_types,
                               fetch_error=fetch_error,
-                              close_finished_queries=close_finished_queries)
+                              close_finished_queries=close_finished_queries,
+                              convert_strings_to_unicode=convert_strings_to_unicode)
 
         if self.default_db is not None:
             log.info('Using database %s as default', self.default_db)
@@ -168,9 +176,11 @@ class HiveServer2Cursor(Cursor):
     # HiveServer2Cursor objects are associated with a Session
     # they are instantiated with alive session_handles
 
-    def __init__(self, session, convert_types=True, fetch_error=True, close_finished_queries=True):
+    def __init__(self, session, convert_types=True, fetch_error=True, close_finished_queries=True,
+                 convert_strings_to_unicode=True):
         self.session = session
         self.convert_types = convert_types
+        self.convert_strings_to_unicode = convert_strings_to_unicode
         self.fetch_error = fetch_error
         self.close_finished_queries = close_finished_queries
 
@@ -461,6 +471,7 @@ class HiveServer2Cursor(Cursor):
             return
         loop_start = time.time()
         while True:
+            start_rpc_time = time.time()
             req = TGetOperationStatusReq(operationHandle=self._last_operation.handle)
             resp = self._last_operation._rpc('GetOperationStatus', req, True)
             self._last_operation.update_has_result_set(resp)
@@ -480,7 +491,13 @@ class HiveServer2Cursor(Cursor):
             if not self._op_state_is_executing(operation_state):
                 self._last_operation_finished = True
                 break
-            time.sleep(self._get_sleep_interval(loop_start))
+            rpc_time = time.time() - start_rpc_time
+            sleep_time = self._get_sleep_interval(loop_start)
+            # Subtract RPC time from the total sleep time. If query option
+            # long_polling_time_ms is set then Impala will sleep in GetOperationStatus
+            # meaning that impyla may not need to sleep at all (IMPALA-13294).
+            if rpc_time < sleep_time:
+                time.sleep(sleep_time - rpc_time)
 
     def status(self):
         if self._last_operation is None:
@@ -570,7 +587,8 @@ class HiveServer2Cursor(Cursor):
             batch = (self._last_operation.fetch(
                          self.description,
                          self.buffersize,
-                         convert_types=self.convert_types))
+                         convert_types=self.convert_types,
+                         convert_strings_to_unicode=self.convert_strings_to_unicode))
             if len(batch) == 0:
                return None
             return batch
@@ -620,7 +638,8 @@ class HiveServer2Cursor(Cursor):
             batch = (self._last_operation.fetch(
                          self.description,
                          self.buffersize,
-                         convert_types=self.convert_types))
+                         convert_types=self.convert_types,
+                         convert_strings_to_unicode=self.convert_strings_to_unicode))
             if len(batch) == 0:
                 break
             batches.append(batch)
@@ -659,8 +678,9 @@ class HiveServer2Cursor(Cursor):
                 log.debug('_ensure_buffer_is_filled: buffer empty and op is active '
                           '=> fetching more data')
                 self._buffer = self._last_operation.fetch(self.description,
-                                                          self.buffersize,
-                                                          convert_types=self.convert_types)
+                    self.buffersize,
+                    convert_types=self.convert_types,
+                    convert_strings_to_unicode=self.convert_strings_to_unicode)
                 if len(self._buffer) > 0:
                     return
                 if not self._buffer.expect_more_rows:
@@ -904,7 +924,7 @@ def connect(host, port, timeout=None, use_ssl=False, ca_cert=None,
             user=None, password=None, kerberos_service_name='impala',
             auth_mechanism=None, krb_host=None, use_http_transport=False,
             http_path='', http_cookie_names=None, retries=3, jwt=None,
-            user_agent=None):
+            user_agent=None, get_user_custom_headers_func=None):
     log.debug('Connecting to HiveServer2 %s:%s with %s authentication '
               'mechanism', host, port, auth_mechanism)
               
@@ -919,14 +939,16 @@ def connect(host, port, timeout=None, use_ssl=False, ca_cert=None,
             raise NotSupportedError("Server authentication is not supported " +
                                     "with HTTP endpoints")
 
-        transport = get_http_transport(host, port, http_path=http_path,
-                                       use_ssl=use_ssl, ca_cert=ca_cert,
-                                       auth_mechanism=auth_mechanism,
-                                       user=user, password=password,
-                                       kerberos_host=kerberos_host,
-                                       kerberos_service_name=kerberos_service_name,
-                                       http_cookie_names=http_cookie_names,
-                                       jwt=jwt, user_agent=user_agent)
+        transport = get_http_transport(
+            host, port, http_path=http_path,
+            use_ssl=use_ssl, ca_cert=ca_cert,
+            auth_mechanism=auth_mechanism,
+            user=user, password=password,
+            kerberos_host=kerberos_host,
+            kerberos_service_name=kerberos_service_name,
+            http_cookie_names=http_cookie_names,
+            jwt=jwt, user_agent=user_agent,
+            get_user_custom_headers_func=get_user_custom_headers_func)
     else:
         sock = get_socket(host, port, use_ssl, ca_cert)
 
@@ -1021,7 +1043,8 @@ class Column(object):
 
 class CBatch(Batch):
 
-    def __init__(self, trowset, expect_more_rows, schema, convert_types=True):
+    def __init__(self, trowset, expect_more_rows, schema, convert_types=True,
+                 convert_strings_to_unicode=True):
         self.expect_more_rows = expect_more_rows
         self.schema = schema
         tcols = [_TTypeId_to_TColumnValue_getters[schema[i][1]](col)
@@ -1032,6 +1055,9 @@ class CBatch(Batch):
 
         log.debug('CBatch: input TRowSet num_cols=%s num_rows=%s tcols=%s',
                   num_cols, num_rows, tcols)
+        
+        HS2_STRING_TYPES = ["STRING", "LIST", "MAP", "STRUCT", "UNIONTYPE", "NULL", "VARCHAR", "CHAR", "TIMESTAMP", "DECIMAL", "DATE"]
+        CONVERTED_TYPES=["TIMESTAMP", "DECIMAL", "DATE"]
 
         self.columns = []
         for j in range(num_cols):
@@ -1049,13 +1075,31 @@ class CBatch(Batch):
 
             # STRING columns are read as binary and decoded here to be able to handle
             # non-valid utf-8 strings in Python 3.
+
             if six.PY3:
-                self._convert_strings_to_unicode(type_, is_null, values)
+                if convert_strings_to_unicode:
+                    self._convert_strings_to_unicode(type_, is_null, values, types=HS2_STRING_TYPES)
+                elif convert_types:
+                    self._convert_strings_to_unicode(type_, is_null, values, types=CONVERTED_TYPES)
 
             if convert_types:
                 values = self._convert_values(type_, is_null, values)
 
             self.columns.append(Column(type_, values, is_null))
+
+    def _convert_strings_to_unicode(self, type_, is_null, values, types):
+        if type_ in types:
+            for i in range(len(values)):
+                if is_null[i]:
+                    values[i] = None
+                    continue
+                try:
+                    # Do similar handling of non-valid UTF-8 strings as Thriftpy2:
+                    # https://github.com/Thriftpy/thriftpy2/blob/8e218b3fd89c597c2e83d129efecfe4d280bdd89/thriftpy2/protocol/binary.py#L241
+                    # If decoding fails then keep the original bytearray.
+                    values[i] = values[i].decode("UTF-8")
+                except UnicodeDecodeError:
+                    pass
 
     def _convert_values(self, type_, is_null, values):
         # pylint: disable=consider-using-enumerate
@@ -1070,20 +1114,6 @@ class CBatch(Batch):
             for i in range(len(values)):
                 values[i] = (None if is_null[i] else _parse_date(values[i]))
         return values
-
-    def _convert_strings_to_unicode(self, type_, is_null, values):
-        if type_ in ["STRING", "LIST", "MAP", "STRUCT", "UNIONTYPE", "DECIMAL", "DATE", "TIMESTAMP", "NULL", "VARCHAR", "CHAR"]:
-            for i in range(len(values)):
-                if is_null[i]:
-                    values[i] = None
-                    continue
-                try:
-                    # Do similar handling of non-valid UTF-8 strings as Thriftpy2:
-                    # https://github.com/Thriftpy/thriftpy2/blob/8e218b3fd89c597c2e83d129efecfe4d280bdd89/thriftpy2/protocol/binary.py#L241
-                    # If decoding fails then keep the original bytearray.
-                    values[i] = values[i].decode("UTF-8")
-                except UnicodeDecodeError:
-                    pass
 
     def __len__(self):
         return self.remaining_rows
@@ -1153,41 +1183,40 @@ class ThriftRPC(object):
         self.client = client
         self.retries = retries
 
-    def _rpc(self, func_name, request, retry_on_http_error=False):
+    def _rpc(self, func_name, request, safe_to_retry=False):
         self._log_request(func_name, request)
-        response = self._execute(func_name, request, retry_on_http_error)
+        response = self._execute(func_name, request, safe_to_retry)
         self._log_response(func_name, response)
         err_if_rpc_not_ok(response)
         return response
 
-    def _execute(self, func_name, request, retry_on_http_error=False):
+    def _execute(self, func_name, request, safe_to_retry=False):
         # pylint: disable=protected-access
         # get the thrift transport
         transport = self.client._iprot.trans
         tries_left = self.retries
-        last_http_exception = None
+        last_exception = None
+        open_finished = False
         while tries_left > 0:
             try:
                 log.debug('Attempting to open transport (tries_left=%s)',
                           tries_left)
                 open_transport(transport)
+                open_finished = True
                 log.debug('Transport opened')
                 func = getattr(self.client, func_name)
                 return func(request)
-            except socket.error:
-                log.exception('Failed to open transport (tries_left=%s)',
-                              tries_left)
-                last_http_exception = None
-            except TTransportException:
-                log.exception('Failed to open transport (tries_left=%s)',
-                              tries_left)
-                last_http_exception = None
+            except (socket.error, TTransportException) as e:
+                if open_finished and not safe_to_retry: raise e
+                msg = "RPC failed" if open_finished else "Failed to open transport"
+                log.exception('%s (tries_left=%s)', msg, tries_left)
+                last_exception = e
             except HttpError as h:
-                if not retry_on_http_error:
+                if not safe_to_retry:
                     log.debug('Caught HttpError %s %s in %s which is not retryable',
                               h, str(h.body or ''), func_name)
                     raise
-                last_http_exception = h
+                last_exception = h
                 if tries_left > 1:
                     retry_secs = None
                     retry_after = h.http_headers.get('Retry-After', None)
@@ -1212,15 +1241,16 @@ class ThriftRPC(object):
                 raise
             log.debug('Closing transport (tries_left=%s)', tries_left)
             transport.close()
+            open_finished = False
             tries_left -= 1
 
-        if last_http_exception is not None:
-            raise last_http_exception
+        if last_exception:
+            raise last_exception
         raise HiveServer2Error('Failed after retrying {0} times'
                                .format(self.retries))
 
-    def _operation(self, kind, request, retry_on_http_error=False):
-        resp = self._rpc(kind, request, retry_on_http_error)
+    def _operation(self, kind, request, safe_to_retry=False):
+        resp = self._rpc(kind, request, safe_to_retry)
         return self._get_operation(resp.operationHandle)
 
     def _log_request(self, kind, request):
@@ -1265,7 +1295,8 @@ class HS2Service(ThriftRPC):
         resp = self._rpc('OpenSession', req, True)
         return HS2Session(self, resp.sessionHandle,
                           resp.configuration,
-                          resp.serverProtocolVersion)
+                          resp.serverProtocolVersion,
+                          retries=self.retries)
 
 
 class HS2Session(ThriftRPC):
@@ -1295,7 +1326,7 @@ class HS2Session(ThriftRPC):
                                    statement=statement,
                                    confOverlay=configuration,
                                    runAsync=run_async)
-        # Do not try to retry http requests.
+        # Do not attempt to retry requests.
         # Read queries should be idempotent but most dml queries are not. Also retrying
         # query execution from client could be expensive and so likely makes sense to do
         # it if server is also aware of the retries.
@@ -1366,7 +1397,8 @@ class HS2Session(ThriftRPC):
         return True
 
     def _get_operation(self, handle):
-        return Operation(self, handle)
+        return Operation(self, handle,
+                         retries=self.retries)
 
 
 class Operation(ThriftRPC):
@@ -1421,7 +1453,7 @@ class Operation(ThriftRPC):
             resp = self._rpc('FetchResults', req, False)
             schema = [('Log', 'STRING', None, None, None, None, None)]
             log = self._wrap_results(resp.results, resp.hasMoreRows, schema,
-                                     convert_types=True)
+                convert_types=True, convert_strings_to_unicode=True)
             log = '\n'.join(l[0] for l in log)
         return log
 
@@ -1466,7 +1498,7 @@ class Operation(ThriftRPC):
 
     def fetch(self, schema=None, max_rows=1024,
               orientation=TFetchOrientation.FETCH_NEXT,
-              convert_types=True):
+              convert_types=True, convert_strings_to_unicode=True):
         if not self.has_result_set:
             log.debug('fetch_results: has_result_set=False')
             return None
@@ -1482,15 +1514,18 @@ class Operation(ThriftRPC):
         # results are kept around for retry to be successful.
         resp = self._rpc('FetchResults', req, False)
         return self._wrap_results(resp.results, resp.hasMoreRows, schema,
-                                  convert_types=convert_types)
+                                  convert_types=convert_types, 
+                                  convert_strings_to_unicode=convert_strings_to_unicode)
 
-    def _wrap_results(self, results, expect_more_rows, schema, convert_types=True):
+    def _wrap_results(self, results, expect_more_rows, schema, convert_types=True, 
+                      convert_strings_to_unicode=True):
         if self.is_columnar:
             log.debug('fetch_results: constructing CBatch')
-            return CBatch(results, expect_more_rows, schema, convert_types=convert_types)
+            return CBatch(results, expect_more_rows, schema, convert_types=convert_types, 
+                          convert_strings_to_unicode=convert_strings_to_unicode)
         else:
             log.debug('fetch_results: constructing RBatch')
-            # TODO: RBatch ignores 'convert_types'
+            # TODO: RBatch ignores 'convert_types' and 'convert_strings_to_unicode'
             return RBatch(results, expect_more_rows, schema)
 
     @property

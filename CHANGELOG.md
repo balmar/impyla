@@ -1,9 +1,30 @@
 Changelog
 =========
 
-0.20a1
+0.21
 ------
 * **Improvements**
+  - Remove versioneer and add Python3.12/3.13 testing (#572)
+    - this is a temporary solution till Python2 support is dropped
+      as no version of versioneer handles both Python 2.7 and 3.12
+  - Allow users to add custom http headers when using hs2-http (#557)
+    - this change is intended to help with testing the server side
+  - Update Impala Thrift definitions. (#575)
+    - this helps in testing newer features in Impala
+
+* **Bug Fixes**
+  - Fix IPv6 address handling in hs2-http protocol
+  - Fix proxy-authentication headers for Python 3.* and long basic
+    credential encodings (#562)
+  - Fix passing retry count configuration to rpc operations (#564)
+  - Fix has_table() with sqlalchemy2 (#568)
+
+Note that this may be the last release with Python 2.7 support.
+
+0.20
+------
+* **Improvements**
+  - Support wildcard http_cookie_names (#509)
   - Add Knox cookies in default cookies list (#525)
   - Support CHAR type in SQLAlchemy (#516)
   - Support Cursor.rowcount and close finished queries (#528)
@@ -13,11 +34,23 @@ Changelog
     when creating a Cursor.
     Also note that Cursor.rowcount only works with Impala server - with
     Hive it will always return -1.
+  - Allow skipping utf8 conversion in Python3 (#548)
+  - Subtract RPC time from sleep in _wait_to_finish (#551)
+  - Reduced logging:
+    - Log "Closing operation" at debug level (#539)
+    - Never log passwords in http connections (#545)
+      - Before the fix passwords were logged at debug level
 
 * **Bug Fixes**
+  - Avoid retrying non-idempotent RPCs in binary connections (#549)
+  - Always set ImpalaHttpClient.__preserve_all_cookies (#553)
   - Fix https connection with Python 3.12 (#531)
     Note that Python 3.12 support is not complete yet.
     A known issue is that installing with setuptools fails with Python 3.12.
+  - Fix SQLAlchemy support for Impala on Python 3.10 (#538)
+  - Turn regex strings into raw strings (#535)
+
+Note that this may be the last release with Python 2.7 support.
 
 0.19.0
 ------

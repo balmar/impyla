@@ -37,8 +37,9 @@ import ssl
 import sys
 
 from impala.error import HttpError
+from impala.util import get_basic_credentials_for_request_headers
 from impala.util import get_logger_and_init_null
-from impala.util import get_all_matching_cookies, get_cookie_expiry
+from impala.util import get_all_matching_cookies, get_all_cookies, get_cookie_expiry
 
 # Declare namedtuple for Cookie with named fields - cookie and expiry_time
 Cookie = namedtuple('Cookie', ['cookie', 'expiry_time'])
@@ -68,12 +69,14 @@ class ImpalaHttpClient(TTransportBase):
   MIN_REQUEST_SIZE_FOR_EXPECT = 1024
 
   def __init__(self, uri_or_host, port=None, path=None, cafile=None, cert_file=None,
-               key_file=None, ssl_context=None, http_cookie_names=None):
+               key_file=None, ssl_context=None, http_cookie_names=None,
+               get_user_custom_headers_func=None):
     """ImpalaHttpClient supports two different types of construction:
 
     ImpalaHttpClient(host, port, path) - deprecated
     ImpalaHttpClient(uri, [port=<n>, path=<s>, cafile=<filename>, cert_file=<filename>,
-        key_file=<filename>, ssl_context=<context>, http_cookie_names=<cookienamelist>])
+        key_file=<filename>, ssl_context=<context>, http_cookie_names=<cookienamelist>],
+        get_user_custom_headers_func=<function_setting_http_headers>)
 
     Only the second supports https.  To properly authenticate against the server,
     provide the client's identity by specifying cert_file and key_file.  To properly
@@ -83,7 +86,12 @@ class ImpalaHttpClient(TTransportBase):
     cookie-based authentication or session management. If there's only one name in the
     cookie name list, a str value can be specified instead of the list. If a cookie with
     one of these names is returned in an http response by the server or an intermediate
-    proxy then it will be included in each subsequent request for the same connection.
+    proxy then it will be included in each subsequent request for the same connection. If
+    it is set as wildcards, all cookies in an http response will be preserved.
+    The optional get_user_custom_headers_func parameter can be used to add http headers
+    to outgoing http messages when using hs2-http protocol. The parameter should be a
+    function returning a list of tuples, each tuple containing a key-value pair
+    representing the header name and value.
     """
     if port is not None:
       warnings.warn(
@@ -129,9 +137,15 @@ class ImpalaHttpClient(TTransportBase):
       self.realhost = self.realport = self.proxy_auth = None
     if not http_cookie_names:
       # 'http_cookie_names' was explicitly set as an empty value ([], or '') in connect().
+      self.__preserve_all_cookies = False
       self.__http_cookie_dict = None
       self.__auth_cookie_names = None
+    elif str(http_cookie_names).strip() == "*":
+      self.__preserve_all_cookies = True
+      self.__http_cookie_dict = dict()
+      self.__auth_cookie_names = set()
     else:
+      self.__preserve_all_cookies = False
       if isinstance(http_cookie_names, six.string_types):
         http_cookie_names = [http_cookie_names]
       # Build a dictionary that maps cookie name to namedtuple.
@@ -140,7 +154,7 @@ class ImpalaHttpClient(TTransportBase):
       # Store the auth cookie names in __auth_cookie_names.
       # Assume auth cookie names end with ".auth".
       self.__auth_cookie_names = \
-          [ cn for cn in http_cookie_names if cn.endswith(".auth") ]
+          { cn for cn in http_cookie_names if cn.endswith(".auth") }
     # Set __are_matching_cookies_found as True if matching cookies are found in response.
     self.__are_matching_cookies_found = False
     self.__wbuf = BytesIO()
@@ -151,6 +165,12 @@ class ImpalaHttpClient(TTransportBase):
     # new request.
     self.__custom_headers = None
     self.__get_custom_headers_func = None
+    # __user_custom_headers is a list of tuples, each tuple contains a key-value pair.
+    self.__user_custom_headers = None
+    if get_user_custom_headers_func:
+        self.__get_user_custom_headers_func = get_user_custom_headers_func
+    else:
+        self.__get_user_custom_headers_func = None
     # the default user agent if none is provied
     self.__custom_user_agent = 'Python/ImpylaHttpClient'
 
@@ -158,10 +178,10 @@ class ImpalaHttpClient(TTransportBase):
   def basic_proxy_auth_header(proxy):
     if proxy is None or not proxy.username:
       return None
-    ap = "%s:%s" % (urllib.parse.unquote(proxy.username),
-                    urllib.parse.unquote(proxy.password))
-    cr = base64.b64encode(ap).strip()
-    return "Basic " + cr
+    return "Basic " + get_basic_credentials_for_request_headers(
+       user=urllib.parse.unquote(proxy.username),
+       password=urllib.parse.unquote(proxy.password),
+    )
 
   def using_proxy(self):
     return self.realhost is not None
@@ -213,12 +233,19 @@ class ImpalaHttpClient(TTransportBase):
   def setGetCustomHeadersFunc(self, func):
     self.__get_custom_headers_func = func
 
-  # Update HTTP headers based on the saved cookies and auth mechanism.
+  # Update outgoing HTTP headers.
+  # This is done by two callback functions, if present
+  # __get_custom_headers_func adds headers based on the saved cookies and auth
+  # mechanism.
+  # __get_user_custom_headers_func adds custom user-supplied http headers.
   def refreshCustomHeaders(self):
     if self.__get_custom_headers_func:
       cookie_header, has_auth_cookie = self.getHttpCookieHeaderForRequest()
       self.__custom_headers = \
           self.__get_custom_headers_func(cookie_header, has_auth_cookie)
+    if self.__get_user_custom_headers_func:
+       self.__user_custom_headers = \
+          self.__get_user_custom_headers_func()
 
   # Return first value as a cookie list for Cookie header. It's a list of name-value
   # pairs in the form of <cookie-name>=<cookie-value>. Pairs in the list are separated by
@@ -248,13 +275,20 @@ class ImpalaHttpClient(TTransportBase):
   # Extract cookies from response and save those cookies for which the cookie names
   # are in the cookie name list specified in the connect() API.
   def extractHttpCookiesFromResponse(self):
-    if self.__http_cookie_dict is not None:
+    if self.__preserve_all_cookies:
+       matching_cookies = get_all_cookies(self.path, self.headers)
+    elif self.__http_cookie_dict is not None:
       matching_cookies = get_all_matching_cookies(
           self.__http_cookie_dict.keys(), self.path, self.headers)
-      if matching_cookies:
-        self.__are_matching_cookies_found = True
-        for c in matching_cookies:
-          self.__http_cookie_dict[c.key] = Cookie(c, get_cookie_expiry(c))
+    else:
+      matching_cookies = None
+
+    if matching_cookies:
+      self.__are_matching_cookies_found = True
+      for c in matching_cookies:
+        self.__http_cookie_dict[c.key] = Cookie(c, get_cookie_expiry(c))
+        if c.key.endswith(".auth"):
+          self.__auth_cookie_names.add(c.key)
 
   # Return True if there are any saved cookies which are sent in previous request.
   def areHttpCookiesSaved(self):
@@ -314,6 +348,9 @@ class ImpalaHttpClient(TTransportBase):
 
       if self.__custom_headers:
         for key, val in six.iteritems(self.__custom_headers):
+          self.__http.putheader(key, val)
+      if self.__user_custom_headers:
+        for key, val in self.__user_custom_headers:
           self.__http.putheader(key, val)
 
       self.__http.endheaders()
@@ -379,7 +416,9 @@ def get_socket(host, port, use_ssl, ca_cert):
 def get_http_transport(host, port, http_path, timeout=None, use_ssl=False,
                        ca_cert=None, auth_mechanism='NOSASL', user=None,
                        password=None, kerberos_host=None, kerberos_service_name=None,
-                       http_cookie_names=None, jwt=None, user_agent=None):
+                       http_cookie_names=None, jwt=None, user_agent=None,
+                       get_user_custom_headers_func=None):
+    host_url = "[%s]" % host if ":" in host else host # add brackets for ipv6 address
     # TODO: support timeout
     if timeout is not None:
         log.error('get_http_transport does not support a timeout')
@@ -391,15 +430,19 @@ def get_http_transport(host, port, http_path, timeout=None, use_ssl=False,
           ssl_ctx.check_hostname = False  # Mandated by the SSL lib for CERT_NONE mode.
           ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        url = 'https://%s:%s/%s' % (host, port, http_path)
+        url = 'https://%s:%s/%s' % (host_url, port, http_path)
         log.debug('get_http_transport url=%s', url)
         # TODO(#362): Add server authentication with thrift 0.12.
-        transport = ImpalaHttpClient(url, ssl_context=ssl_ctx,
-                                     http_cookie_names=http_cookie_names)
+        transport = ImpalaHttpClient(
+            url, ssl_context=ssl_ctx,
+            http_cookie_names=http_cookie_names,
+            get_user_custom_headers_func=get_user_custom_headers_func)
     else:
-        url = 'http://%s:%s/%s' % (host, port, http_path)
+        url = 'http://%s:%s/%s' % (host_url, port, http_path)
         log.debug('get_http_transport url=%s', url)
-        transport = ImpalaHttpClient(url, http_cookie_names=http_cookie_names)
+        transport = ImpalaHttpClient(
+            url, http_cookie_names=http_cookie_names,
+            get_user_custom_headers_func=get_user_custom_headers_func)
 
     # set custom user agent if provided by user
     if user_agent:
@@ -416,14 +459,12 @@ def get_http_transport(host, port, http_path, timeout=None, use_ssl=False,
             else:
                 # PLAIN always requires a password for HS2.
                 password = 'password'
-        log.debug('get_http_transport: password=%s', password)
+            log.debug('get_http_transport: password=%s', password)
+        else:
+            log.debug('get_http_transport: password=fuggetaboutit')
         auth_mechanism = 'PLAIN'  # sasl doesn't know mechanism LDAP
         # Set the BASIC auth header
-        user_password = '%s:%s'.encode() % (user.encode(), password.encode())
-        try:
-            auth = base64.encodebytes(user_password).decode().strip('\n')
-        except AttributeError:
-            auth = base64.encodestring(user_password).decode().strip('\n')
+        auth = get_basic_credentials_for_request_headers(user, password)
 
         def get_custom_headers(cookie_header, has_auth_cookie):
             custom_headers = {}

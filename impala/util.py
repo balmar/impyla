@@ -14,6 +14,7 @@
 
 from __future__ import absolute_import
 
+import base64
 import sys
 import warnings
 import logging
@@ -203,7 +204,8 @@ def get_cookie_expiry(c):
     return None
 
 
-def get_all_matching_cookies(cookie_names, path, resp_headers):
+def get_cookies(resp_headers):
+    """Returns a SimpleCookie containing all Set-Cookie entries in resp_headers."""
     if 'Set-Cookie' not in resp_headers:
         return None
 
@@ -215,7 +217,34 @@ def get_all_matching_cookies(cookie_names, path, resp_headers):
             cookie_headers = resp_headers.get_all('Set-Cookie')
             for header in cookie_headers:
                 cookies.load(header)
+        return cookies
     except Exception:
+        return None
+
+
+def get_all_cookies(path, resp_headers):
+    """Return cookies that match path.
+
+    Returns a list of Morsel objects representing cookie key/value pairs for all cookies
+    in resp_headers matching path."""
+    cookies = get_cookies(resp_headers)
+    if not cookies:
+        return None
+
+    matching_cookies = []
+    for c in cookies.values():
+        if c and cookie_matches_path(c, path):
+            matching_cookies.append(c)
+    return matching_cookies
+
+
+def get_all_matching_cookies(cookie_names, path, resp_headers):
+    """Return cookies in cookie_names that match path.
+
+    Returns a list of Morsel objects representing cookie key/value pairs for cookies
+    in resp_headers matching path where the cookie is also listed in cookie_names."""
+    cookies = get_cookies(resp_headers)
+    if not cookies:
         return None
 
     matching_cookies = []
@@ -225,3 +254,15 @@ def get_all_matching_cookies(cookie_names, path, resp_headers):
             if c and cookie_matches_path(c, path):
                 matching_cookies.append(c)
     return matching_cookies
+
+
+def get_basic_credentials_for_request_headers(user, password):
+    """Returns base64 encoded credentials for HTTP request headers
+
+    This function produces RFC 2617-compliant basic credentials:
+    - RFC 2045 encoding of username:password without limitations to 76 chars
+      per line (and without trailing newline)
+    - No translation of characters (+,/) for URL-safety
+    """
+    user_password = '%s:%s' % (user, password)
+    return base64.b64encode(user_password.encode()).decode()

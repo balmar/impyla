@@ -15,11 +15,12 @@
 from __future__ import absolute_import
 
 from sqlalchemy.engine import create_engine
-from sqlalchemy import Table, Column, select, insert
+from sqlalchemy import Table, Column, select, insert, text
 from sqlalchemy.schema import MetaData, CreateTable
 
 from impala.sqlalchemy import STRING, INT, DOUBLE, TINYINT, DATE, VARCHAR
 from impala.tests.util import ImpylaTestEnv
+import pandas as pd
 
 TEST_ENV = ImpylaTestEnv()
 
@@ -53,7 +54,8 @@ def create_simple_test_table():
                )
 
 def create_test_engine(diealect):
-    return create_engine('{0}://{1}:{2}'.format(diealect, TEST_ENV.host, TEST_ENV.port))
+    host = "[%s]" % TEST_ENV.host if ":" in TEST_ENV.host else TEST_ENV.host
+    return create_engine('{0}://{1}:{2}'.format(diealect, host, TEST_ENV.port))
 
 def test_sqlalchemy_impala_compilation():
     engine = create_test_engine("impala")
@@ -104,3 +106,18 @@ def test_sqlalchemy_multiinsert():
             assert expected_result == result
         finally:
             table.drop(conn)
+
+def test_pandas_dataframe_to_sql():
+    engine = create_test_engine("impala")
+    # Creating a sample dataframe to push to the DB.
+    df = pd.DataFrame([[1, 2, 3], [4, 5, 6], [7, 8, 9]], columns=['a', 'b', 'c'])
+
+    with engine.connect() as conn:
+        try:
+            df.to_sql('test_table', conn, if_exists='replace', index=False)
+            table = pd.read_sql('DESCRIBE test_table', conn)
+            columns = table['name'].tolist()
+            assert ['a', 'b', 'c'] == columns
+
+        finally:
+            conn.execute(text('DROP TABLE test_table'))

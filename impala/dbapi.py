@@ -44,7 +44,8 @@ def connect(host='localhost', port=21050, database=None, timeout=None,
             ldap_user=None, ldap_password=None, use_kerberos=None,
             protocol=None, krb_host=None, use_http_transport=False,
             http_path='', auth_cookie_names=None, http_cookie_names=None,
-            retries=3, jwt=None, user_agent=None):
+            retries=3, jwt=None, user_agent=None,
+            get_user_custom_headers_func=None):
     """Get a connection to HiveServer2 (HS2).
 
     These options are largely compatible with the impala-shell command line
@@ -91,11 +92,11 @@ def connect(host='localhost', port=21050, database=None, timeout=None,
         name only, a str value can be specified instead of a list.
         If a cookie with one of these names is returned in an http response by the server
         or an intermediate proxy then it will be included in each subsequent request for
-        the same connection.
+        the same connection. If set to wildcard ('*'), all cookies in an http response
+        will be preserved. By default 'http_cookie_names' is set to '*'.
         Used only when `use_http_transport` is True.
-        By default 'http_cookie_names' is set to the list of HTTP cookie names used by
-        Impala and Hive. The names of authentication cookies are expected to end with
-        ".auth" string, for example, "impala.auth" for Impala authentication cookies.
+        The names of authentication cookies are expected to end with ".auth" string, for
+        example, "impala.auth" for Impala authentication cookies.
         If 'http_cookie_names' is explicitly set to a not None empty value ([], or ''),
         Impyla won't attempt to do cookie based authentication or session management.
         Currently cookie retention is supported for GSSAPI/LDAP/SASL/NOSASL/JWT over http.
@@ -105,6 +106,10 @@ def connect(host='localhost', port=21050, database=None, timeout=None,
         'Python/ImpylaHttpClient' is used
     use_ldap : bool, optional
         Specify `auth_mechanism='LDAP'` instead.
+    get_user_custom_headers_func : function, optional
+        Used to add custom headers to the http messages when using hs2-http protocol.
+        This is a function returning a list of tuples, each tuple contains a key-value
+        pair. This allows duplicate headers to be set.
 
         .. deprecated:: 0.18.0
     auth_cookie_names : list of str or str, optional
@@ -191,8 +196,8 @@ def connect(host='localhost', port=21050, database=None, timeout=None,
         warn_deprecate('auth_cookie_names', 'http_cookie_names')
         http_cookie_names = auth_cookie_names
     elif http_cookie_names is None:
-        # Set default value as the list of HTTP cookie names used by Impala, Hive and Knox.
-        http_cookie_names = ['impala.auth', 'impala.session.id', 'hive.server2.auth', 'KNOXSESSIONID', 'KNOX_BACKEND-HIVE', 'JSESSIONID']
+        # Preserve all cookies.
+        http_cookie_names = '*'
 
     service = hs2.connect(host=host, port=port,
                           timeout=timeout, use_ssl=use_ssl,
@@ -203,7 +208,8 @@ def connect(host='localhost', port=21050, database=None, timeout=None,
                           http_path=http_path,
                           http_cookie_names=http_cookie_names,
                           retries=retries,
-                          jwt=jwt, user_agent=user_agent)
+                          jwt=jwt, user_agent=user_agent,
+                          get_user_custom_headers_func=get_user_custom_headers_func)
     return hs2.HiveServer2Connection(service, default_db=database)
 
 

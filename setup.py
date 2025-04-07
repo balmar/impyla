@@ -24,12 +24,10 @@ def readme():
     with open('README.md', 'r') as ip:
         return ip.read()
 
-import versioneer  # noqa
-
 setup(
     name='impyla',
-    version=versioneer.get_version(),
-    cmdclass=versioneer.get_cmdclass(),
+    # impala/__init__.py also contains the version - the two should have the same value!
+    version='v0.21.0',
     description='Python client for the Impala distributed query engine',
     long_description_content_type='text/markdown',
     long_description=readme(),
@@ -41,7 +39,7 @@ setup(
     packages=find_packages(),
     install_package_data=True,
     package_data={'impala.thrift': ['*.thrift']},
-    install_requires=['six', 'bitarray', 'thrift==0.16.0', 'thrift_sasl==0.4.3'],
+    install_requires=['six', 'bitarray<3', 'thrift==0.16.0', 'thrift_sasl==0.4.3'],
     extras_require={
         "kerberos": ['kerberos>=1.3.0'],
     },
@@ -50,15 +48,16 @@ setup(
     license='Apache License, Version 2.0',
     classifiers=[
         'Programming Language :: Python :: 2',
-        'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.4',
-        'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
-        'Programming Language :: Python :: 3.9'
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
     ],
     entry_points={
         'sqlalchemy.dialects': ['impala = impala.sqlalchemy:ImpalaDialect',

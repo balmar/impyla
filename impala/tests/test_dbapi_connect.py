@@ -15,6 +15,7 @@
 from __future__ import absolute_import, print_function
 
 import sys
+import time
 
 from impala.error import NotSupportedError
 
@@ -29,6 +30,7 @@ from impala.dbapi import connect, AUTH_MECHANISMS
 from impala.util import _random_id
 from impala.tests.util import ImpylaTestEnv, SocketTracker
 
+from thrift.transport.TTransport import TTransportException
 
 ENV = ImpylaTestEnv()
 DEFAULT_AUTH = True
@@ -48,6 +50,8 @@ JWT_DISABLED_ERROR = "JWT authentication disabled"
 SSL_DISABLED = ENV.ssl_cert == ""
 SSL_DISABLED_ERROR = "No ssl certificate set."
 
+# Table loading / DDLs can take several seconds in Impala. Use a larger timeout to avoid flaky tests.
+TIMEOUT_S = 10
 
 class ImpalaConnectionTests(unittest.TestCase):
 
@@ -94,14 +98,14 @@ class ImpalaConnectionTests(unittest.TestCase):
         return username
 
     def test_impala_nosasl_connect(self):
-        self.connection = connect(ENV.host, ENV.port, timeout=5)
+        self.connection = connect(ENV.host, ENV.port, timeout=TIMEOUT_S)
         self._execute_queries(self.connection)
 
     @pytest.mark.skipif(ENV.skip_hive_tests, reason="Skipping hive tests")
     def test_hive_plain_connect(self):
         self.connection = connect(ENV.host, ENV.hive_port,
                                   auth_mechanism="PLAIN",
-                                  timeout=5,
+                                  timeout=TIMEOUT_S,
                                   user=ENV.hive_user,
                                   password="cloudera")
         self._execute_queries(self.connection)
@@ -109,7 +113,7 @@ class ImpalaConnectionTests(unittest.TestCase):
     @pytest.mark.skipif(DEFAULT_AUTH, reason=DEFAULT_AUTH_ERROR)
     def test_impala_plain_connect(self):
         self.connection = connect(ENV.host, ENV.port, auth_mechanism="PLAIN",
-                                  timeout=5,
+                                  timeout=TIMEOUT_S,
                                   user=ENV.hive_user,
                                   password="cloudera")
         self._execute_queries(self.connection)
@@ -117,7 +121,7 @@ class ImpalaConnectionTests(unittest.TestCase):
     @pytest.mark.skipif(DEFAULT_AUTH, reason=DEFAULT_AUTH_ERROR)
     def test_impala_ldap_connect_user_agent(self):
         self.connection = connect(ENV.host, ENV.port, auth_mechanism="LDAP",
-                                  timeout=5,
+                                  timeout=TIMEOUT_S,
                                   user=ENV.hive_user,
                                   password="cloudera",
                                   http_path="http-path",
@@ -128,7 +132,7 @@ class ImpalaConnectionTests(unittest.TestCase):
 
     @pytest.mark.skipif(DEFAULT_AUTH, reason=DEFAULT_AUTH_ERROR)
     def test_hive_nosasl_connect(self):
-        self.connection = connect(ENV.host, ENV.hive_port, timeout=5)
+        self.connection = connect(ENV.host, ENV.hive_port, timeout=TIMEOUT_S)
         self._execute_queries(self.connection)
 
     @pytest.mark.params_neg
@@ -160,7 +164,7 @@ class ImpalaConnectionTests(unittest.TestCase):
         jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwidXNlcm5hbWUiOiJpbXB5bGFqd3R0ZXN0IiwiaWF0IjoxNTE2MjM5MDIyfQ.Uvq2TZ9nRtM-JgFEd_fL2Z0kFcflx0Tr5cbJR4yySyc"
         self.connection = connect(ENV.host, ENV.http_port, use_http_transport=True,
                                   http_path="cliservice", auth_mechanism="JWT",
-                                  timeout=5, jwt=jwt)
+                                  timeout=TIMEOUT_S, jwt=jwt)
         username = self._execute_query_get_username(self.connection)
         assert(username == "impylajwttest")
         print("Username: {0}".format(username))
@@ -236,21 +240,70 @@ class ImpalaConnectionTests(unittest.TestCase):
 
     @pytest.mark.skipif(SSL_DISABLED, reason=SSL_DISABLED_ERROR)
     def test_ssl_connection_no_cert(self):
-        self.connection = connect(ENV.host, ENV.port, timeout=5, use_ssl=True)
+        self.connection = connect(ENV.host, ENV.port, timeout=TIMEOUT_S, use_ssl=True)
         self._execute_queries(self.connection)
 
 
     @pytest.mark.skipif(SSL_DISABLED, reason=SSL_DISABLED_ERROR)
     def test_ssl_connection_with_cert(self):
         self.connection = connect(
-            ENV.host, ENV.port, use_ssl=True, timeout=5, ca_cert=ENV.ssl_cert)
+            ENV.host, ENV.port, use_ssl=True, timeout=TIMEOUT_S, ca_cert=ENV.ssl_cert)
         self._execute_queries(self.connection)
 
     @pytest.mark.skipif(SSL_DISABLED, reason=SSL_DISABLED_ERROR)
     def test_https_connection(self):
         self.connection = connect(ENV.host, ENV.http_port, use_http_transport=True,
-                                  http_path="cliservice", use_ssl=True, timeout=5)
+                                  http_path="cliservice", use_ssl=True, timeout=TIMEOUT_S)
         self._execute_queries(self.connection)
+
+    def test_retry_dml(self):
+        """Regression test for #549.
+        Checks the INSERT statements are not retried when the client disconnects due to timeout
+        during execute()."""
+        # Connection with higher timeout to avoid errors.
+        self.connection = connect(ENV.host, ENV.port, timeout=TIMEOUT_S)
+        create = "CREATE TABLE {0} (f1 INT)".format(self.tablename)
+        refresh = "REFRESH {0}".format(self.tablename)
+        insert = "INSERT INTO TABLE {0} SELECT 1".format(self.tablename)
+        select = "SELECT * FROM {0}".format(self.tablename)
+        drop = "DROP TABLE {0}".format(self.tablename)
+        reliable_cur = self.connection.cursor()
+        reliable_cur.execute(create)
+        reliable_cur.execute(refresh) # Load table metadata to make subsequent operations faster.
+        successful_inserts = 0
+        NUM_INSERTS = 3
+        for i in range(NUM_INSERTS):
+            # Connect with low timeout to trigger failed RPCs.
+            LOW_TIMEOUT_S = 1
+            low_timeout_connection = connect(ENV.host, ENV.port, timeout=LOW_TIMEOUT_S)
+            low_timeout_cur = low_timeout_connection.cursor()
+            try:
+                # Use IMPALAD_LOAD_TABLES_DELAY>LOW_TIMEOUT_S to trigger timeout.
+                # IMPALAD_LOAD_TABLES_DELAY was added in Impala 4.4.0 (IMPALA-12493), so with
+                # older Impala servers the test is not expected to work.
+                DELAY_S = LOW_TIMEOUT_S + 1
+                configuration = {"debug_action": "IMPALAD_LOAD_TABLES_DELAY:SLEEP@{}".format(1000 * DELAY_S)}
+                low_timeout_cur.execute(insert, configuration=configuration)
+                successful_inserts += 1
+            except TTransportException:
+                # Sleep until the insert is expected to be finished and close the session.
+                SLEEP_S = DELAY_S - LOW_TIMEOUT_S + 2
+                time.sleep(SLEEP_S)
+                # Reopen the transport to allow closing the session correctly.
+                low_timeout_cur.session.client._iprot.trans.close()
+                low_timeout_cur.session.client._iprot.trans.open()
+                low_timeout_cur.close()
+                low_timeout_connection.close()
+        assert successful_inserts == 0
+        # Use the reliable connection for result checking and cleanup.
+        reliable_cur.execute(select)
+        result = reliable_cur.fetchall()
+        # All inserts must have actually finished after client timeout.
+        assert len(result) == NUM_INSERTS
+        reliable_cur.execute(drop)
+        # If all inserts are successful then probably the Impala cluster is too fast.
+        assert successful_inserts < NUM_INSERTS
+
 
 class ImpalaSocketTests(unittest.TestCase):
 
