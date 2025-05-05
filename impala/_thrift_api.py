@@ -397,7 +397,6 @@ def get_socket(host, port, use_ssl, ca_cert):
 
     if use_ssl:
         from thrift.transport.TSSLSocket import TSSLSocket
-        log.debug('get_socket - use_ssl')
         # This copies the solution in IMPALA-11343.
         # TODO: remove once Thrit 0.17.0 is released
         class ImpalaTSSLSocket(TSSLSocket):
@@ -406,9 +405,9 @@ def get_socket(host, port, use_ssl, ca_cert):
             return self.handle is not None
 
         if ca_cert is None:
-            return ImpalaTSSLSocket(host, port, validate=False, ssl_version=ssl.PROTOCOL_TLSv1_2, ciphers='AES256-GCM-SHA384')
+            return ImpalaTSSLSocket(host, port, validate=False, ssl_version=ssl.PROTOCOL_SSLv23, ciphers='AES256-GCM-SHA384')
         else:
-            return ImpalaTSSLSocket(host, port, validate=True, ca_certs=ca_cert, ssl_version=ssl.PROTOCOL_TLSv1_2, ciphers='AES256-GCM-SHA384')
+            return ImpalaTSSLSocket(host, port, validate=True, ca_certs=ca_cert, ssl_version=ssl.PROTOCOL_SSLv23, ciphers='AES256-GCM-SHA384')
     else:
         return TSocket(host, port)
 
