@@ -42,7 +42,7 @@ setup(
     install_requires=['six',
                       'bitarray<3; python_version < "3"',
                       'bitarray; python_version >= "3"',
-                      'thrift==0.23.0',
+                      'thrift @ git+https://github.com/balmar/thrift.git@master#subdirectory=lib/py',
                       'thrift_sasl==0.4.3'],
     extras_require={
         "kerberos": ['kerberos>=1.3.0'],
